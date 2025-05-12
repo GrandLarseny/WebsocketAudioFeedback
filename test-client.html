@@ -40,8 +40,20 @@
             <div class="controls">
                 <button id="connectBtn">Connect</button>
                 <button id="disconnectBtn" disabled>Disconnect</button>
-                <input type="file" id="fileInput" accept="video/mp4" disabled />
+                <input type="file" id="fileInput" accept="video/mp4,audio/*" disabled />
                 <button id="sendBtn" disabled>Send File</button>
+            </div>
+            
+            <div class="settings">
+                <label>
+                    <span>Chunk Size:</span>
+                    <select id="chunkSizeSelect">
+                        <option value="32768">32 KB</option>
+                        <option value="65536" selected>64 KB</option>
+                        <option value="131072">128 KB</option>
+                        <option value="262144">256 KB</option>
+                    </select>
+                </label>
             </div>
 
             <div>
@@ -52,7 +64,7 @@
 
         <script>
             let ws = null;
-            const chunkSize = 64 * 1024; // 64KB chunks
+            let chunkSize = 64 * 1024; // 64KB chunks by default
 
             // DOM elements
             const statusEl = document.getElementById("status");
@@ -61,6 +73,7 @@
             const fileInput = document.getElementById("fileInput");
             const sendBtn = document.getElementById("sendBtn");
             const logEl = document.getElementById("log");
+            const chunkSizeSelect = document.getElementById("chunkSizeSelect");
 
             // Log function
             function log(message) {
@@ -100,11 +113,15 @@
                         try {
                             const message = JSON.parse(event.data);
                             if (message.status === "processing_complete") {
-                                log("Server: Audio processing complete, starting playback");
+                                log("Server: All data received, processing complete");
                             } else if (message.status === "playback_complete") {
                                 log("Server: Audio playback completed");
                             } else if (message.status === "error") {
                                 log(`Server error: ${message.message}`);
+                            } else if (message.status === "chunk_received") {
+                                log(`Server: Received chunk ${message.chunkId}`);
+                            } else if (message.status === "chunk_playing") {
+                                log(`Server: Now playing chunk ${message.chunkId}`);
                             } else {
                                 log(`Server message: ${event.data}`);
                             }
@@ -124,6 +141,12 @@
                 }
             });
 
+            // Update chunk size when selection changes
+            chunkSizeSelect.addEventListener("change", () => {
+                chunkSize = parseInt(chunkSizeSelect.value);
+                log(`Chunk size changed to ${chunkSize/1024} KB`);
+            });
+            
             // Send file in chunks
             sendBtn.addEventListener("click", async () => {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -144,6 +167,10 @@
                     const buffer = await file.arrayBuffer();
                     const total = buffer.byteLength;
 
+                    // Calculate total chunks
+                    const totalChunks = Math.ceil(total / chunkSize);
+                    log(`Splitting file into ${totalChunks} chunks for faster playback`);
+                        
                     // Send file in chunks
                     for (let start = 0; start < total; start += chunkSize) {
                         if (ws.readyState !== WebSocket.OPEN) {
@@ -153,17 +180,17 @@
 
                         const end = Math.min(start + chunkSize, total);
                         const chunk = buffer.slice(start, end);
+                        const chunkNum = Math.floor(start / chunkSize);
 
                         ws.send(chunk);
                         log(
-                            `Sent chunk: ${start} to ${end} (${end - start} bytes)`,
+                            `Sent chunk ${chunkNum+1}/${totalChunks}: ${start} to ${end} (${end - start} bytes)`,
                         );
 
                         // Small delay to avoid overwhelming the server
                         await new Promise((resolve) => setTimeout(resolve, 10));
                     }
 
-                    // Send 'end' message to signal the end of file transfer
                     ws.send("end");
                     log("End signal sent, file sent completely");
                 } catch (err) {

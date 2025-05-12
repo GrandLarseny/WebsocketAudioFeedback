@@ -1,11 +1,10 @@
 const WebSocket = require("ws");
 const ffmpeg = require("fluent-ffmpeg");
-const { WritableStreamBuffer } = require("stream-buffers");
-const stream = require("stream");
 const fs = require("fs");
 const tmp = require("tmp");
 const player = require("play-sound")({});
 const path = require("path");
+const { PassThrough } = require("stream");
 
 // Create a websocket server
 const wss = new WebSocket.Server({ port: 8080 });
@@ -43,105 +42,143 @@ process.on("exit", () => {
 wss.on("connection", (ws) => {
   console.log("Client connected");
 
-  // Create a unique filename for this connection
-  const fileId = Date.now().toString();
-  const tempInputFile = path.join(tmpDir.name, `input-${fileId}.mp4`);
-  const tempOutputFile = path.join(tmpDir.name, `output-${fileId}.wav`);
-
-  // Add to cleanup list
-  tempFiles.push(tempInputFile);
-  tempFiles.push(tempOutputFile);
-
-  // Create a write stream for the input file
-  const fileStream = fs.createWriteStream(tempInputFile);
+  // Create unique session ID
+  const sessionId = Date.now().toString();
+  
+  // Set up file paths
+  const chunkDir = path.join(tmpDir.name, `chunks-${sessionId}`);
+  fs.mkdirSync(chunkDir, { recursive: true });
+  
+  // Track chunks and playback
+  let chunkCount = 0;
+  let playbackStarted = false;
+  let currentPlayingChunk = 0;
   let dataReceived = false;
-
-  // Handle incoming messages (MP4 data chunks)
+  let processingInProgress = false;
+  
+  // Track audio process
+  let ffmpegProcess = null;
+  
+  // Function to process and play a chunk
+  const processAndPlayNextChunk = () => {
+    if (currentPlayingChunk >= chunkCount || processingInProgress) return;
+    
+    processingInProgress = true;
+    console.log(`Processing chunk ${currentPlayingChunk}/${chunkCount}`);
+    
+    const inputChunk = path.join(chunkDir, `chunk-${currentPlayingChunk}.mp4`);
+    const outputChunk = path.join(chunkDir, `chunk-${currentPlayingChunk}.wav`);
+    
+    tempFiles.push(outputChunk);
+    
+    ffmpeg(inputChunk)
+      .noVideo()
+      .audioCodec("pcm_s16le")
+      .audioChannels(2)
+      .audioFrequency(44100)
+      .output(outputChunk)
+      .on("error", (err) => {
+        console.error(`FFmpeg error processing chunk ${currentPlayingChunk}:`, err);
+        processingInProgress = false;
+        currentPlayingChunk++;
+        
+        // Try the next chunk
+        processAndPlayNextChunk();
+      })
+      .on("end", () => {
+        console.log(`FFmpeg finished processing chunk ${currentPlayingChunk}`);
+        
+        // Play the audio
+        player.play(outputChunk, (err) => {
+          if (err) {
+            console.error(`Error playing chunk ${currentPlayingChunk}:`, err);
+          } else {
+            console.log(`Finished playing chunk ${currentPlayingChunk}`);
+          }
+          
+          // Clean up this chunk
+          try {
+            fs.unlinkSync(inputChunk);
+            fs.unlinkSync(outputChunk);
+          } catch (e) {
+            console.error("Error deleting chunk files:", e);
+          }
+          
+          // Move to next chunk
+          currentPlayingChunk++;
+          processingInProgress = false;
+          
+          // Process next chunk if available
+          processAndPlayNextChunk();
+        });
+      })
+      .run();
+  };
+  
+  // Process incoming data as smaller chunks
   ws.on("message", (data) => {
-    // Check if the message is the end signal (string message)
-    if (typeof data === 'string' || data instanceof Buffer && data.toString() === 'end') {
-      const dataStr = data.toString();
-      if (dataStr === 'end') {
-        console.log("Received end signal, processing file...");
-        fileStream.end();
-        
-        // Process the file if we received data
-        if (dataReceived) {
-        console.log("Processing received data...");
-        
-        // Process the file with FFmpeg
-        ffmpeg(tempInputFile)
-          .noVideo()
-          .audioCodec("pcm_s16le")
-          .audioChannels(2)
-          .audioFrequency(44100)
-          .output(tempOutputFile)
-          .on("error", (err) => {
-            console.error("FFmpeg error:", err);
-            ws.send(JSON.stringify({ status: "error", message: "FFmpeg error: " + err.message }));
-          })
-          .on("end", () => {
-            console.log("FFmpeg processing finished, playing audio...");
-            ws.send(JSON.stringify({ status: "processing_complete" }));
-
-            // Play the audio file
-            player.play(tempOutputFile, (err) => {
-              if (err) {
-                console.error("Error playing audio:", err);
-                ws.send(JSON.stringify({ status: "error", message: "Error playing audio: " + err.message }));
-              } else {
-                console.log("Audio playback completed");
-                ws.send(JSON.stringify({ status: "playback_complete" }));
-              }
-
-              // Clean up files after playing
-              setTimeout(() => {
-                try {
-                  if (fs.existsSync(tempInputFile)) {
-                    fs.unlinkSync(tempInputFile);
-                    console.log(`Deleted input file: ${tempInputFile}`);
-                  }
-                  if (fs.existsSync(tempOutputFile)) {
-                    fs.unlinkSync(tempOutputFile);
-                    console.log(`Deleted output file: ${tempOutputFile}`);
-                  }
-                } catch (err) {
-                  console.error("Error cleaning up files:", err);
-                }
-              }, 1000);
-            });
-          })
-          .run();
-        }
-        return;
+    // Check if it's the end signal
+    if (typeof data === 'string' || (data instanceof Buffer && data.toString() === 'end')) {
+      console.log("Received end signal");
+      
+      // Process any remaining chunks
+      if (dataReceived && !playbackStarted && chunkCount > 0) {
+        playbackStarted = true;
+        processAndPlayNextChunk();
       }
+      
+      // Send status to client
+      ws.send(JSON.stringify({ status: "processing_complete", message: "All data received" }));
+      return;
     }
     
+    // Handle normal data
     console.log(`Received ${data.length} bytes of data`);
     dataReceived = true;
-
-    // Write the data to the file
-    fileStream.write(data);
+    
+    // Write data to a new chunk file
+    const chunkFile = path.join(chunkDir, `chunk-${chunkCount}.mp4`);
+    fs.writeFileSync(chunkFile, data);
+    tempFiles.push(chunkFile);
+    chunkCount++;
+    
+    // Send acknowledgment to client
+    ws.send(JSON.stringify({ status: "chunk_received", chunkId: chunkCount-1 }));
+    
+    // Start playback if this is the first chunk or we have enough buffered
+    if (!playbackStarted && chunkCount >= 2) {  // Start after 2 chunks for buffer
+      playbackStarted = true;
+      processAndPlayNextChunk();
+    }
   });
-
-  // Handle client disconnect or close
+  
+  // Handle client disconnect
   ws.on("close", () => {
     console.log("Client disconnected");
-
-    // End the file stream if it hasn't been ended already
-    if (fileStream && !fileStream.closed) {
-      fileStream.end();
+    
+    // Clean up chunk directory
+    try {
+      if (fs.existsSync(chunkDir)) {
+        const files = fs.readdirSync(chunkDir);
+        files.forEach(file => {
+          try {
+            fs.unlinkSync(path.join(chunkDir, file));
+          } catch (e) {
+            // Ignore errors
+          }
+        });
+        fs.rmdirSync(chunkDir);
+      }
+    } catch (err) {
+      console.error("Error cleaning up chunk directory:", err);
     }
     
-    // We don't need to process here anymore since we're handling it in the 'end' message
-    // Just log the disconnection
     console.log("Connection closed and resources cleaned up");
   });
-
+  
   // Handle errors
   ws.on("error", (err) => {
     console.error("WebSocket error:", err);
-    fileStream.end();
   });
 });
 

@@ -8,10 +8,12 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "ws": "^8.13.0",
-    "play-sound": "^1.1.5",
     "fluent-ffmpeg": "^2.1.2",
+    "play-sound": "^1.1.5",
+    "speaker": "^0.5.5",
     "stream-buffers": "^3.0.2",
-    "tmp": "^0.2.1"
+    "stream-split": "^1.1.0",
+    "tmp": "^0.2.1",
+    "ws": "^8.13.0"
   }
 }
