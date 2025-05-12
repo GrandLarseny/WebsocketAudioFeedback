@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>WebSocket MP4 Player Test Client</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+            .container {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+            .controls {
+                display: flex;
+                gap: 10px;
+            }
+            button {
+                padding: 8px 16px;
+                cursor: pointer;
+            }
+            #status {
+                padding: 10px;
+                background-color: #f0f0f0;
+                border-radius: 4px;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>WebSocket MP4 Player Test Client</h1>
+
+            <div id="status">Status: Disconnected</div>
+
+            <div class="controls">
+                <button id="connectBtn">Connect</button>
+                <button id="disconnectBtn" disabled>Disconnect</button>
+                <input type="file" id="fileInput" accept="video/mp4" disabled />
+                <button id="sendBtn" disabled>Send File</button>
+            </div>
+
+            <div>
+                <h3>Log:</h3>
+                <pre id="log"></pre>
+            </div>
+        </div>
+
+        <script>
+            let ws = null;
+            const chunkSize = 64 * 1024; // 64KB chunks
+
+            // DOM elements
+            const statusEl = document.getElementById("status");
+            const connectBtn = document.getElementById("connectBtn");
+            const disconnectBtn = document.getElementById("disconnectBtn");
+            const fileInput = document.getElementById("fileInput");
+            const sendBtn = document.getElementById("sendBtn");
+            const logEl = document.getElementById("log");
+
+            // Log function
+            function log(message) {
+                logEl.textContent += `${new Date().toISOString().substr(11, 8)} - ${message}\n`;
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            // Connect to WebSocket server
+            connectBtn.addEventListener("click", () => {
+                try {
+                    ws = new WebSocket("ws://localhost:8080");
+
+                    ws.onopen = () => {
+                        statusEl.textContent = "Status: Connected";
+                        connectBtn.disabled = true;
+                        disconnectBtn.disabled = false;
+                        fileInput.disabled = false;
+                        sendBtn.disabled = false;
+                        log("Connected to server");
+                    };
+
+                    ws.onclose = () => {
+                        statusEl.textContent = "Status: Disconnected";
+                        connectBtn.disabled = false;
+                        disconnectBtn.disabled = true;
+                        fileInput.disabled = true;
+                        sendBtn.disabled = true;
+                        log("Disconnected from server");
+                        ws = null;
+                    };
+
+                    ws.onerror = (error) => {
+                        log(`WebSocket error: ${error}`);
+                    };
+                
+                    ws.onmessage = (event) => {
+                        try {
+                            const message = JSON.parse(event.data);
+                            if (message.status === "processing_complete") {
+                                log("Server: Audio processing complete, starting playback");
+                            } else if (message.status === "playback_complete") {
+                                log("Server: Audio playback completed");
+                            } else if (message.status === "error") {
+                                log(`Server error: ${message.message}`);
+                            } else {
+                                log(`Server message: ${event.data}`);
+                            }
+                        } catch (e) {
+                            log(`Received message: ${event.data}`);
+                        }
+                    };
+                } catch (err) {
+                    log(`Connection error: ${err.message}`);
+                }
+            });
+
+            // Disconnect from WebSocket server
+            disconnectBtn.addEventListener("click", () => {
+                if (ws) {
+                    ws.close();
+                }
+            });
+
+            // Send file in chunks
+            sendBtn.addEventListener("click", async () => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    log("Not connected to server");
+                    return;
+                }
+
+                const file = fileInput.files[0];
+                if (!file) {
+                    log("No file selected");
+                    return;
+                }
+
+                log(`Sending file: ${file.name} (${file.size} bytes)`);
+
+                try {
+                    // Read file as ArrayBuffer
+                    const buffer = await file.arrayBuffer();
+                    const total = buffer.byteLength;
+
+                    // Send file in chunks
+                    for (let start = 0; start < total; start += chunkSize) {
+                        if (ws.readyState !== WebSocket.OPEN) {
+                            log("Connection closed while sending");
+                            break;
+                        }
+
+                        const end = Math.min(start + chunkSize, total);
+                        const chunk = buffer.slice(start, end);
+
+                        ws.send(chunk);
+                        log(
+                            `Sent chunk: ${start} to ${end} (${end - start} bytes)`,
+                        );
+
+                        // Small delay to avoid overwhelming the server
+                        await new Promise((resolve) => setTimeout(resolve, 10));
+                    }
+
+                    // Send 'end' message to signal the end of file transfer
+                    ws.send("end");
+                    log("End signal sent, file sent completely");
+                } catch (err) {
+                    log(`Error sending file: ${err.message}`);
+                }
+            });
+        </script>
+    </body>
+</html>

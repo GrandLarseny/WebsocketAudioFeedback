@@ -1,0 +1,17 @@
+{
+  "name": "websocket-player",
+  "version": "1.0.0",
+  "description": "WebSocket server that receives MP4 data and plays it on server speakers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "ws": "^8.13.0",
+    "play-sound": "^1.1.5",
+    "fluent-ffmpeg": "^2.1.2",
+    "stream-buffers": "^3.0.2",
+    "tmp": "^0.2.1"
+  }
+}
