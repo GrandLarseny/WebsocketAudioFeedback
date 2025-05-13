@@ -1,6 +1,6 @@
 # macOS Setup Instructions
 
-The `speaker` package requires certain dependencies to work properly on macOS.
+This application requires FFmpeg to be installed on your system to process audio files.
 
 ## Prerequisites
 
@@ -9,22 +9,14 @@ The `speaker` package requires certain dependencies to work properly on macOS.
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-2. Install required audio dependencies:
+2. Install FFmpeg:
 ```
-brew install portaudio
-```
-
-## Alternative Approach
-
-If you continue to have issues with the `speaker` package on macOS, an alternative is to use a different audio playback approach:
-
-1. Change package.json to use `node-wav-player` instead:
-```
-npm uninstall speaker
-npm install node-wav-player
+brew install ffmpeg
 ```
 
-2. Then modify the server code to save the audio to a temporary WAV file and play it.
+## Audio Playback
+
+The application uses the system's default audio player to play processed audio files. Make sure you have a default audio player that can handle WAV files.
 
 ## Common Issues
 
@@ -33,7 +25,7 @@ If you encounter errors related to XCode Command Line Tools, run:
 xcode-select --install
 ```
 
-For other audio library issues, you might need:
+If FFmpeg reports issues with certain codecs, you may need to reinstall it with additional options:
 ```
-brew install pkg-config
+brew reinstall ffmpeg --with-opus --with-fdk-aac
 ```

@@ -10,7 +10,6 @@
   "dependencies": {
     "fluent-ffmpeg": "^2.1.2",
     "play-sound": "^1.1.5",
-    "speaker": "^0.5.5",
     "stream-buffers": "^3.0.2",
     "stream-split": "^1.1.0",
     "tmp": "^0.2.1",
