@@ -52,8 +52,16 @@
                         <option value="65536" selected>64 KB</option>
                         <option value="131072">128 KB</option>
                         <option value="262144">256 KB</option>
+                        <option value="524288">512 KB</option>
+                        <option value="1048576">1 MB</option>
                     </select>
                 </label>
+                <div id="progressContainer" style="display: none; margin-top: 10px;">
+                    <div>Processing: <span id="progressPercent">0</span>%</div>
+                    <div style="background-color: #eee; height: 20px; width: 100%; border-radius: 4px;">
+                        <div id="progressBar" style="background-color: #4CAF50; height: 100%; width: 0%; border-radius: 4px;"></div>
+                    </div>
+                </div>
             </div>
 
             <div>
@@ -74,6 +82,9 @@
             const sendBtn = document.getElementById("sendBtn");
             const logEl = document.getElementById("log");
             const chunkSizeSelect = document.getElementById("chunkSizeSelect");
+            const progressContainer = document.getElementById("progressContainer");
+            const progressBar = document.getElementById("progressBar");
+            const progressPercent = document.getElementById("progressPercent");
 
             // Log function
             function log(message) {
@@ -112,18 +123,38 @@
                     ws.onmessage = (event) => {
                         try {
                             const message = JSON.parse(event.data);
-                            if (message.status === "processing_complete") {
-                                log("Server: All data received, processing complete");
-                            } else if (message.status === "playback_complete") {
-                                log("Server: Audio playback completed");
-                            } else if (message.status === "error") {
-                                log(`Server error: ${message.message}`);
-                            } else if (message.status === "chunk_received") {
-                                log(`Server: Received chunk ${message.chunkId}`);
-                            } else if (message.status === "chunk_playing") {
-                                log(`Server: Now playing chunk ${message.chunkId}`);
-                            } else {
-                                log(`Server message: ${event.data}`);
+                            switch (message.status) {
+                                case "processing_started":
+                                    log("Server: Started processing audio data");
+                                    progressContainer.style.display = "block";
+                                    break;
+                                case "processing_progress":
+                                    const percent = message.percent.toFixed(1);
+                                    progressPercent.textContent = percent;
+                                    progressBar.style.width = `${percent}%`;
+                                    break;
+                                case "processing_complete":
+                                    log("Server: Audio processing complete");
+                                    progressBar.style.width = "100%";
+                                    progressPercent.textContent = "100";
+                                    break;
+                                case "playback_started":
+                                    log("Server: Starting audio playback");
+                                    break;
+                                case "playback_complete":
+                                    log("Server: Audio playback completed");
+                                    break;
+                                case "error":
+                                    log(`Server error: ${message.message}`);
+                                    break;
+                                case "chunk_received":
+                                    log(`Server: Received chunk (${(message.bytes/1024).toFixed(1)} KB, total: ${(message.totalBytes/1024).toFixed(1)} KB)`);
+                                    break;
+                                case "all_data_received":
+                                    log("Server: All data received, finalizing processing");
+                                    break;
+                                default:
+                                    log(`Server message: ${event.data}`);
                             }
                         } catch (e) {
                             log(`Received message: ${event.data}`);
@@ -171,6 +202,11 @@
                     const totalChunks = Math.ceil(total / chunkSize);
                     log(`Splitting file into ${totalChunks} chunks for faster playback`);
                         
+                    // Reset progress display
+                    progressContainer.style.display = "none";
+                    progressBar.style.width = "0%";
+                    progressPercent.textContent = "0";
+                    
                     // Send file in chunks
                     for (let start = 0; start < total; start += chunkSize) {
                         if (ws.readyState !== WebSocket.OPEN) {
@@ -181,10 +217,11 @@
                         const end = Math.min(start + chunkSize, total);
                         const chunk = buffer.slice(start, end);
                         const chunkNum = Math.floor(start / chunkSize);
+                        const percentComplete = ((start + chunk.byteLength) / total * 100).toFixed(1);
 
                         ws.send(chunk);
                         log(
-                            `Sent chunk ${chunkNum+1}/${totalChunks}: ${start} to ${end} (${end - start} bytes)`,
+                            `Sent chunk ${chunkNum+1}/${totalChunks}: ${(chunk.byteLength/1024).toFixed(1)} KB (${percentComplete}% of file)`,
                         );
 
                         // Small delay to avoid overwhelming the server

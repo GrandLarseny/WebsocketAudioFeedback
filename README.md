@@ -1,6 +1,6 @@
 # WebSocket Player
 
-A Node.js WebSocket server that receives buffered MP4 data and plays it on the server's speakers in real-time, with optimized streaming playback for faster audio feedback.
+A Node.js WebSocket server that receives MP4 data via WebSocket and quickly processes it for playback on the server's speakers, using progressive buffering for faster audio feedback.
 
 ## Requirements
 
@@ -34,20 +34,22 @@ npm start
 2. Open `test-client.html` in a web browser
 3. Click "Connect" to establish a WebSocket connection
 4. Select an MP4 or audio file using the file input
-5. (Optional) Adjust the chunk size for optimal streaming performance
-6. Click "Send File" to stream the file to the server for real-time playback
-7. Audio playback will begin as soon as the first chunks are processed, without waiting for the entire file
+5. (Optional) Adjust the chunk size for optimal transfer performance
+6. Click "Send File" to stream the file to the server
+7. Audio processing starts automatically after receiving 512KB of data
+8. Visual progress bar shows processing status
+9. Audio playback begins as soon as processing completes
 
 ## How It Works
 
 1. The client connects to the WebSocket server
 2. The client sends MP4 data in small chunks to the server
-3. The server processes each chunk individually:
-   - Saves each chunk to a temporary file
-   - Starts processing early chunks while later chunks are still being received
-   - Converts each chunk to WAV format using FFmpeg
-   - Plays each chunk as soon as it's converted
-4. This approach provides near real-time audio playback without waiting for the entire file to be received
+3. The server uses a progressive buffering approach:
+   - Data is accumulated in a single file
+   - Processing begins after receiving a minimum buffer (512KB by default)
+   - FFmpeg extracts and converts the audio to WAV format
+   - Audio playback starts as soon as processing completes
+4. This approach balances fast audio playback with proper MP4 processing
 5. Temporary files are cleaned up after playback
 
 ## Platform-Specific Notes
@@ -73,5 +75,6 @@ npm start
 - If you encounter issues with audio playback, verify that FFmpeg is properly installed
 - For audio format issues, you may need to adjust the FFmpeg parameters in `server.js`
 - Ensure you have a default media player application associated with WAV files
-- If playback is choppy, try adjusting the chunk size in the client interface
-- For large files, the initial playback may have a slight delay as the first chunks are processed
+- If data transfer is slow, try increasing the chunk size in the client interface
+- If processing is slow, consider adjusting the `MIN_BUFFER_TO_START` value in server.js
+- The server requires a complete MP4 header to process audio correctly, which is why progressive buffering is used instead of processing individual chunks
