@@ -44,8 +44,9 @@ wss.on("connection", (ws) => {
   // Create a unique session ID
   const sessionId = Date.now().toString();
   
-  // Create file paths for this session
-  const tempInputFile = path.join(tmpDir.name, `input-${sessionId}.mp4`);
+  // Base file paths for this session (will update extension based on format)
+  const tempInputFileBase = path.join(tmpDir.name, `input-${sessionId}`);
+  const tempInputFile = tempInputFileBase + '.tmp'; // Temporary extension until format is known
   const tempOutputFile = path.join(tmpDir.name, `output-${sessionId}.wav`);
   
   // Add to cleanup list
@@ -88,15 +89,43 @@ wss.on("connection", (ws) => {
   
   // Function to process audio with FFmpeg
   const processAudio = () => {
-    console.log("Starting FFmpeg processing...");
-    ws.send(JSON.stringify({ status: "processing_started" }));
+    console.log(`Starting FFmpeg processing for ${fileFormat} file...`);
+    ws.send(JSON.stringify({ status: "processing_started", format: fileFormat }));
     
-    ffmpeg(tempInputFile)
-      .noVideo()
+    // Update input file extension based on format
+    const inputWithCorrectExt = tempInputFileBase + '.' + fileFormat;
+    
+    // Rename file to have the correct extension
+    try {
+      fs.renameSync(tempInputFile, inputWithCorrectExt);
+      console.log(`Renamed input file to match format: ${fileFormat}`);
+    } catch (err) {
+      console.error(`Error renaming file: ${err}`);
+      // If rename fails, continue with original file
+    }
+    
+    // Create FFmpeg command based on file format
+    const command = ffmpeg(fs.existsSync(inputWithCorrectExt) ? inputWithCorrectExt : tempInputFile)
       .audioCodec("pcm_s16le")
       .audioChannels(2)
       .audioFrequency(44100)
-      .output(tempOutputFile)
+      .output(tempOutputFile);
+    
+    // Add format-specific options
+    if (fileFormat === 'webm') {
+      command.inputOption('-threads 4');
+    } else if (fileFormat === 'mp3') {
+      // MP3 specific options if needed
+      command.inputOption('-acodec mp3');
+    }
+    
+    // Determine whether to strip video (don't for audio-only formats)
+    if (fileFormat === 'mp4' || fileFormat === 'webm') {
+      command.noVideo();
+    }
+    
+    // Execute the command with all options set
+    command
       .on("start", (commandLine) => {
         console.log("FFmpeg process started:", commandLine);
       })
@@ -142,12 +171,26 @@ wss.on("connection", (ws) => {
   
   // Function to clean up files
   const cleanupFiles = () => {
+    // Clean up files after playing
     setTimeout(() => {
       try {
-        if (fs.existsSync(tempInputFile)) {
-          fs.unlinkSync(tempInputFile);
-          console.log(`Deleted input file: ${tempInputFile}`);
-        }
+        // Check all possible input files with various extensions
+        const possibleInputFiles = [
+          tempInputFile,
+          tempInputFileBase + '.mp4',
+          tempInputFileBase + '.mp3',
+          tempInputFileBase + '.webm'
+        ];
+        
+        // Delete any existing input files
+        possibleInputFiles.forEach(file => {
+          if (fs.existsSync(file)) {
+            fs.unlinkSync(file);
+            console.log(`Deleted input file: ${file}`);
+          }
+        });
+                
+        // Delete output file
         if (fs.existsSync(tempOutputFile)) {
           fs.unlinkSync(tempOutputFile);
           console.log(`Deleted output file: ${tempOutputFile}`);
@@ -158,21 +201,41 @@ wss.on("connection", (ws) => {
     }, 1000);
   };
   
-  // Handle incoming messages (MP4 data chunks)
+  // Track file format
+  let fileFormat = 'mp4'; // Default format
+  
+  // Process incoming messages (audio/video data chunks)
   ws.on("message", (data) => {
-    // Check if this is the end signal
-    if (data.toString() === 'end') {
-      console.log("Received end signal from client");
-      ws.send(JSON.stringify({ status: "all_data_received" }));
+    // Check if this is a control message
+    if (typeof data === 'string' || (data instanceof Buffer && data.byteLength < 100)) {
+      const message = data.toString();
       
-      // End the file stream
-      fileStream.end();
-      
-      // If we haven't started processing yet but have received data, start now
-      if (!processingStarted && dataReceived) {
-        processAudio();
+      // Check for end signal
+      if (message === 'end') {
+        console.log("Received end signal from client");
+        ws.send(JSON.stringify({ status: "all_data_received" }));
+        
+        // End the file stream
+        fileStream.end();
+        
+        // If we haven't started processing yet but have received data, start now
+        if (!processingStarted && dataReceived) {
+          processAudio();
+        }
+        return;
       }
-      return;
+      
+      // Check for format information
+      if (message.startsWith('format:')) {
+        const newFormat = message.split(':')[1].trim();
+        if (['mp4', 'mp3', 'webm'].includes(newFormat)) {
+          fileFormat = newFormat;
+          console.log(`Client specified file format: ${fileFormat}`);
+        } else {
+          console.warn(`Ignoring unsupported format: ${newFormat}, using ${fileFormat} instead`);
+        }
+        return;
+      }
     }
     
     // Normal data chunk

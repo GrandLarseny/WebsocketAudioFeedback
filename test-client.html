@@ -40,12 +40,21 @@
             <div class="controls">
                 <button id="connectBtn">Connect</button>
                 <button id="disconnectBtn" disabled>Disconnect</button>
-                <input type="file" id="fileInput" accept="video/mp4,audio/*" disabled />
+                <input type="file" id="fileInput" accept="video/mp4,video/webm,audio/mp3,audio/*" disabled />
                 <button id="sendBtn" disabled>Send File</button>
             </div>
             
             <div class="settings">
                 <label>
+                    <span>File Format:</span>
+                    <select id="formatSelect">
+                        <option value="auto" selected>Auto Detect</option>
+                        <option value="mp4">MP4</option>
+                        <option value="mp3">MP3</option>
+                        <option value="webm">WebM</option>
+                    </select>
+                </label>
+                <label style="margin-left: 15px;">
                     <span>Chunk Size:</span>
                     <select id="chunkSizeSelect">
                         <option value="32768">32 KB</option>
@@ -81,6 +90,7 @@
             const fileInput = document.getElementById("fileInput");
             const sendBtn = document.getElementById("sendBtn");
             const logEl = document.getElementById("log");
+            const formatSelect = document.getElementById("formatSelect");
             const chunkSizeSelect = document.getElementById("chunkSizeSelect");
             const progressContainer = document.getElementById("progressContainer");
             const progressBar = document.getElementById("progressBar");
@@ -125,7 +135,8 @@
                             const message = JSON.parse(event.data);
                             switch (message.status) {
                                 case "processing_started":
-                                    log("Server: Started processing audio data");
+                                    const format = message.format || "audio";
+                                    log(`Server: Started processing ${format} data`);
                                     progressContainer.style.display = "block";
                                     break;
                                 case "processing_progress":
@@ -178,6 +189,33 @@
                 log(`Chunk size changed to ${chunkSize/1024} KB`);
             });
             
+            // Get file format extension
+            function getFileExtension(filename) {
+                return filename.slice((filename.lastIndexOf(".") - 1 >>> 0) + 2).toLowerCase();
+            }
+                
+            // Detect file format
+            function detectFileFormat(file) {
+                const userSelectedFormat = formatSelect.value;
+                if (userSelectedFormat !== 'auto') {
+                    return userSelectedFormat;
+                }
+                    
+                // Auto-detect based on file extension
+                const extension = getFileExtension(file.name);
+                if (['mp4', 'mp3', 'webm'].includes(extension)) {
+                    return extension;
+                }
+                    
+                // Fallback based on MIME type
+                if (file.type.startsWith('video/mp4')) return 'mp4';
+                if (file.type.startsWith('audio/mp3') || file.type.startsWith('audio/mpeg')) return 'mp3';
+                if (file.type.startsWith('video/webm')) return 'webm';
+                    
+                // Default
+                return 'mp4';
+            }
+                
             // Send file in chunks
             sendBtn.addEventListener("click", async () => {
                 if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -191,9 +229,13 @@
                     return;
                 }
 
-                log(`Sending file: ${file.name} (${file.size} bytes)`);
+                const fileFormat = detectFileFormat(file);
+                log(`Sending file: ${file.name} (${file.size} bytes) as ${fileFormat} format`);
 
                 try {
+                    // Send format information to the server
+                    ws.send(`format:${fileFormat}`);
+                    
                     // Read file as ArrayBuffer
                     const buffer = await file.arrayBuffer();
                     const total = buffer.byteLength;
@@ -229,7 +271,7 @@
                     }
 
                     ws.send("end");
-                    log("End signal sent, file sent completely");
+                    log(`End signal sent, file (${fileFormat} format) sent completely`);
                 } catch (err) {
                     log(`Error sending file: ${err.message}`);
                 }
