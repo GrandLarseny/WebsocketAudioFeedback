@@ -41,6 +41,7 @@
                 <button id="connectBtn">Connect</button>
                 <button id="disconnectBtn" disabled>Disconnect</button>
                 <input type="file" id="fileInput" accept="video/mp4,video/webm,audio/mp3,audio/*" disabled />
+                <button id="recordBtn" disabled>Record</button>
                 <button id="sendBtn" disabled>Send File</button>
             </div>
             
@@ -52,6 +53,7 @@
                         <option value="mp4">MP4</option>
                         <option value="mp3">MP3</option>
                         <option value="webm">WebM</option>
+                        <option value="mediaplayer">Live Recording</option>
                     </select>
                 </label>
                 <label style="margin-left: 15px;">
@@ -64,6 +66,10 @@
                         <option value="524288">512 KB</option>
                         <option value="1048576">1 MB</option>
                     </select>
+                </label>
+                <label style="margin-left: 15px;">
+                    <input type="checkbox" id="waitForDisconnectCheckbox">
+                    <span>Wait to play until disconnected</span>
                 </label>
                 <div id="progressContainer" style="display: none; margin-top: 10px;">
                     <div>Processing: <span id="progressPercent">0</span>%</div>
@@ -89,12 +95,18 @@
             const disconnectBtn = document.getElementById("disconnectBtn");
             const fileInput = document.getElementById("fileInput");
             const sendBtn = document.getElementById("sendBtn");
+            const recordBtn = document.getElementById("recordBtn");
             const logEl = document.getElementById("log");
             const formatSelect = document.getElementById("formatSelect");
             const chunkSizeSelect = document.getElementById("chunkSizeSelect");
             const progressContainer = document.getElementById("progressContainer");
             const progressBar = document.getElementById("progressBar");
             const progressPercent = document.getElementById("progressPercent");
+            
+            // MediaRecorder variables
+            let mediaRecorder = null;
+            let recordedChunks = [];
+            let isRecording = false;
 
             // Log function
             function log(message) {
@@ -105,7 +117,12 @@
             // Connect to WebSocket server
             connectBtn.addEventListener("click", () => {
                 try {
-                    ws = new WebSocket("ws://localhost:8080");
+                    const waitForDisconnect = document.getElementById("waitForDisconnectCheckbox").checked;
+                    const wsUrl = waitForDisconnect ? 
+                        "ws://localhost:8080?waitForDisconnect=true" : 
+                        "ws://localhost:8080";
+                    
+                    ws = new WebSocket(wsUrl);
 
                     ws.onopen = () => {
                         statusEl.textContent = "Status: Connected";
@@ -113,6 +130,7 @@
                         disconnectBtn.disabled = false;
                         fileInput.disabled = false;
                         sendBtn.disabled = false;
+                        recordBtn.disabled = false;
                         log("Connected to server");
                     };
 
@@ -122,6 +140,7 @@
                         disconnectBtn.disabled = true;
                         fileInput.disabled = true;
                         sendBtn.disabled = true;
+                        recordBtn.disabled = true;
                         log("Disconnected from server");
                         ws = null;
                     };
@@ -164,6 +183,9 @@
                                 case "all_data_received":
                                     log("Server: All data received, finalizing processing");
                                     break;
+                                case "waiting_for_disconnect":
+                                    log("Server: Processing complete, waiting for client disconnect to play audio");
+                                    break;
                                 default:
                                     log(`Server message: ${event.data}`);
                             }
@@ -180,6 +202,101 @@
             disconnectBtn.addEventListener("click", () => {
                 if (ws) {
                     ws.close();
+                }
+                stopRecording();
+            });
+            
+            // Function to stop recording
+            function stopRecording() {
+                if (mediaRecorder && isRecording) {
+                    mediaRecorder.stop();
+                    isRecording = false;
+                    recordBtn.textContent = "Record";
+                    log("Recording stopped");
+                }
+            }
+            
+            // Record audio/video
+            recordBtn.addEventListener("click", async () => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    log("Not connected to server");
+                    return;
+                }
+                
+                if (isRecording) {
+                    stopRecording();
+                    return;
+                }
+                
+                try {
+                    // Get user media
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: true,
+                        video: false
+                    });
+                    
+                    // Reset recorded chunks
+                    recordedChunks = [];
+                    
+                    // Find a supported MIME type for MediaRecorder
+                    const mimeTypes = [
+                        'video/mp4',
+                        'video/webm',
+                        'audio/webm',
+                        'audio/mp4'
+                    ];
+                    
+                    let mimeType = '';
+                    for (const type of mimeTypes) {
+                        if (MediaRecorder.isTypeSupported(type)) {
+                            mimeType = type;
+                            break;
+                        }
+                    }
+                    
+                    if (!mimeType) {
+                        throw new Error('No supported MIME type found for MediaRecorder');
+                    }
+                    
+                    // Create MediaRecorder with supported MIME type
+                    const options = { mimeType };
+                    mediaRecorder = new MediaRecorder(stream, options);
+                    
+                    // Send format information to the server
+                    ws.send(`format:${mimeType}`);
+                    log(`Using MediaRecorder format: ${mimeType}`);
+                    
+                    // Handle data available events
+                    mediaRecorder.ondataavailable = event => {
+                        if (event.data.size > 0) {
+                            recordedChunks.push(event.data);
+                            // Send data to server immediately
+                            ws.send(event.data);
+                            log(`Sent recorded chunk: ${(event.data.size/1024).toFixed(1)} KB`);
+                        }
+                    };
+                    
+                    // Handle recording stop
+                    mediaRecorder.onstop = () => {
+                        log("MediaRecorder stopped");
+                        // Release stream tracks
+                        stream.getTracks().forEach(track => track.stop());
+                        // Send end signal to server
+                        ws.send("end");
+                    };
+                    
+                    // Start recording with small timeslice to get frequent chunks
+                    mediaRecorder.start(1000); // Get a chunk every second
+                    isRecording = true;
+                    recordBtn.textContent = "Stop Recording";
+                    log("MediaRecorder started");
+                    
+                } catch (err) {
+                    log(`MediaRecorder error: ${err.message}`);
+                    if (err.name === 'NotSupportedError') {
+                        log("MediaRecorder with the attempted MIME types is not supported in this browser.");
+                        log("Try using Chrome, Firefox or other browsers with MediaRecorder support.");
+                    }
                 }
             });
 
@@ -229,7 +346,11 @@
                     return;
                 }
 
-                const fileFormat = detectFileFormat(file);
+                // Detect file format, but don't use Live Recording option with files
+                const userSelectedFormat = formatSelect.value;
+                const fileFormat = userSelectedFormat === 'mediaplayer' ? 
+                    detectFileFormat(file) : userSelectedFormat === 'auto' ? 
+                    detectFileFormat(file) : userSelectedFormat;
                 log(`Sending file: ${file.name} (${file.size} bytes) as ${fileFormat} format`);
 
                 try {

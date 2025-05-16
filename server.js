@@ -10,6 +10,18 @@ const wss = new WebSocket.Server({ port: 8080 });
 
 console.log("WebSocket server started on port 8080");
 
+// Parse URL parameters from WebSocket connection
+function parseQueryString(url) {
+  if (!url || !url.includes('?')) return {};
+  const queryString = url.split('?')[1];
+  const params = {};
+  queryString.split('&').forEach(pair => {
+    const [key, value] = pair.split('=');
+    params[key] = value !== undefined ? decodeURIComponent(value) : true;
+  });
+  return params;
+}
+
 // Create a temporary directory for storing audio files
 const tmpDir = tmp.dirSync({ unsafeCleanup: true });
 console.log(`Created temporary directory: ${tmpDir.name}`);
@@ -38,8 +50,13 @@ process.on("exit", () => {
 });
 
 // Handle connections
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
   console.log("Client connected");
+  
+  // Parse query parameters from the connection URL
+  const queryParams = parseQueryString(req.url);
+  const waitForDisconnect = queryParams.waitForDisconnect === 'true';
+  console.log(`waitForDisconnect parameter: ${waitForDisconnect}`);
 
   // Create a unique session ID
   const sessionId = Date.now().toString();
@@ -61,6 +78,8 @@ wss.on("connection", (ws) => {
   let bytesReceived = 0;
   let processingStarted = false;
   let playbackStarted = false;
+  let processingComplete = false;
+  let clientDisconnected = false;
   
   // Buffer size thresholds
   const MIN_BUFFER_TO_START = 512 * 1024; // 512KB before starting processing
@@ -117,11 +136,51 @@ wss.on("connection", (ws) => {
     } else if (fileFormat === 'mp3') {
       // MP3 specific options if needed
       command.inputOption('-acodec mp3');
+    } else if (mediaRecorderFormat) {
+      // Special handling for MediaRecorder formats
+      command.inputOption('-fflags +genpts');
+      
+      // For MediaRecorder streams, input format might be ambiguous
+      // Try to use the specific format first but add fallbacks
+      try {
+        command.inputFormat(fileFormat);
+      } catch (err) {
+        console.warn(`Error setting input format, trying fallback options: ${err.message}`);
+      }
+      
+      // Add specific options based on the MIME type
+      if (mediaMimeType.startsWith('audio/')) {
+        console.log(`Processing MediaRecorder audio format: ${mediaMimeType}`);
+        // Try codec detection first
+        command.inputOption('-acodec auto');
+      } else if (mediaMimeType.startsWith('video/')) {
+        console.log(`Processing MediaRecorder video format: ${mediaMimeType}`);
+        if (mediaMimeType.includes('webm')) {
+          command.inputOption('-acodec opus');
+        } else {
+          command.inputOption('-acodec aac');
+        }
+      }
+      
+      // Add extra options to help with handling potentially malformed data
+      command.inputOption('-err_detect ignore_err');
     }
     
     // Determine whether to strip video (don't for audio-only formats)
     if (fileFormat === 'mp4' || fileFormat === 'webm') {
       command.noVideo();
+    }
+    
+    // Add special options for MediaRecorder format
+    if (mediaRecorderFormat) {
+      console.log(`Processing MediaRecorder format with special handling: ${mediaMimeType}`);
+      command.outputOption('-avoid_negative_ts make_zero');
+      command.outputOption('-analyzeduration 2147483647');
+      command.outputOption('-probesize 2147483647');
+      
+      // Add additional options for better handling of potentially incomplete streams
+      command.outputOption('-max_muxing_queue_size 9999');
+      command.outputOption('-fflags +discardcorrupt+genpts');
     }
     
     // Execute the command with all options set
@@ -144,7 +203,7 @@ wss.on("connection", (ws) => {
         console.log("FFmpeg processing finished, playing audio...");
         ws.send(JSON.stringify({ status: "processing_complete" }));
         
-        // Play the audio file
+        // Play the audio file (or wait for disconnect if that option is set)
         playAudio();
       })
       .run();
@@ -152,22 +211,40 @@ wss.on("connection", (ws) => {
   
   // Function to play the processed audio
   const playAudio = () => {
+    // If waitForDisconnect is true and client is still connected, don't play yet
+    if (waitForDisconnect && !clientDisconnected) {
+      console.log("Processing complete but waiting for client to disconnect before playback");
+      ws.send(JSON.stringify({ status: "waiting_for_disconnect" }));
+      processingComplete = true;
+      return;
+    }
+    
     playbackStarted = true;
-    ws.send(JSON.stringify({ status: "playback_started" }));
+    
+    // Only send status if client is still connected
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ status: "playback_started" }));
+    }
     
     player.play(tempOutputFile, (err) => {
       if (err) {
         console.error("Error playing audio:", err);
-        ws.send(JSON.stringify({ status: "error", message: "Error playing audio: " + err.message }));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ status: "error", message: "Error playing audio: " + err.message }));
+        }
       } else {
         console.log("Audio playback completed");
-        ws.send(JSON.stringify({ status: "playback_complete" }));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ status: "playback_complete" }));
+        }
       }
       
       // Clean up files after playing
-      cleanupFiles();
-    });
-  };
+    cleanupFiles();
+  });
+    
+  console.log(`Started playback of audio file in ${fileFormat} format${mediaRecorderFormat ? ` (original: ${mediaMimeType})` : ''}`);
+};
   
   // Function to clean up files
   const cleanupFiles = () => {
@@ -203,6 +280,8 @@ wss.on("connection", (ws) => {
   
   // Track file format
   let fileFormat = 'mp4'; // Default format
+  let mediaRecorderFormat = false; // Flag to indicate if the data is from MediaRecorder
+  let mediaMimeType = ''; // Store the original MIME type from MediaRecorder
   
   // Process incoming messages (audio/video data chunks)
   ws.on("message", (data) => {
@@ -228,7 +307,26 @@ wss.on("connection", (ws) => {
       // Check for format information
       if (message.startsWith('format:')) {
         const newFormat = message.split(':')[1].trim();
-        if (['mp4', 'mp3', 'webm'].includes(newFormat)) {
+        // Check if it's a MediaRecorder MIME type
+        if (newFormat.includes('/')) {
+          mediaMimeType = newFormat;
+          mediaRecorderFormat = true;
+          
+          // Extract container format from MIME type
+          if (newFormat.includes('mp4')) {
+            fileFormat = 'mp4';
+          } else if (newFormat.includes('webm')) {
+            fileFormat = 'webm';
+          } else if (newFormat.includes('mp3') || newFormat.includes('mpeg')) {
+            fileFormat = 'mp3';
+          } else {
+            // Default to mp4 for unknown formats (with warning)
+            fileFormat = 'mp4';
+            console.warn(`Unknown MediaRecorder format: ${newFormat}, defaulting to ${fileFormat}`);
+          }
+          
+          console.log(`Client specified MediaRecorder format: ${newFormat}, using ${fileFormat}`);
+        } else if (['mp4', 'mp3', 'webm'].includes(newFormat)) {
           fileFormat = newFormat;
           console.log(`Client specified file format: ${fileFormat}`);
         } else {
@@ -260,6 +358,7 @@ wss.on("connection", (ws) => {
   // Handle client disconnect
   ws.on("close", () => {
     console.log("Client disconnected");
+    clientDisconnected = true;
     
     // Clean up timer
     if (processingCheckTimer) {
@@ -275,6 +374,16 @@ wss.on("connection", (ws) => {
     // If we received data but never started processing, start now
     if (dataReceived && !processingStarted) {
       processAudio();
+    }
+    
+    // If processing is complete but waiting for disconnect to play, play now
+    if (processingComplete && !playbackStarted && waitForDisconnect) {
+      console.log("Client disconnected, starting audio playback now");
+      
+      // Small delay to ensure all cleanup has happened
+      setTimeout(() => {
+        playAudio();
+      }, 100);
     }
   });
   
