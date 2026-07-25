@@ -12,7 +12,7 @@
     "play-sound": "^1.1.5",
     "stream-buffers": "^3.0.2",
     "stream-split": "^1.1.0",
-    "tmp": "^0.2.6",
+    "tmp": "^0.2.7",
     "ws": "^8.21.0"
   }
 }
